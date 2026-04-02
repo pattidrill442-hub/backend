@@ -9,10 +9,9 @@ from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 
 app = FastAPI(title="Breast Cancer Detection API")
 
-# Allow mobile app/frontend requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # restrict later if needed
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -24,34 +23,30 @@ IMG_SIZE = (224, 224)
 MIN_WIDTH = 100
 MIN_HEIGHT = 100
 
-# Thresholds
-CONFIDENCE_THRESHOLD = 0.70       # for benign/malignant acceptance
-INVALID_THRESHOLD = 0.70          # only reject as invalid if invalid score is really high
+CONFIDENCE_THRESHOLD = 0.70
+INVALID_THRESHOLD = 0.70
 
-# IMPORTANT:
-# This order should match the class_names from your training dataset.
-# With folders benign / invalid / malignant loaded alphabetically,
-# TensorFlow will usually use this exact order:
 CLASS_NAMES = ["benign", "invalid", "malignant"]
 
 BENIGN_INDEX = CLASS_NAMES.index("benign")
 INVALID_INDEX = CLASS_NAMES.index("invalid")
 MALIGNANT_INDEX = CLASS_NAMES.index("malignant")
 
-# Load model once at startup
 model = tf.keras.models.load_model(MODEL_PATH)
 
 
 def validate_uploaded_image(image_bytes: bytes, content_type: str | None):
-    if not content_type or not content_type.startswith("image/"):
-        return False, "Unsupported file type", "Please upload a valid image file."
-
+    # FIX: Try PIL first — don't reject based on content_type alone
     try:
         image = Image.open(BytesIO(image_bytes)).convert("RGB")
     except UnidentifiedImageError:
         return False, "Invalid image", "Could not process the uploaded file as an image."
     except Exception:
         return False, "Invalid image", "Could not process the uploaded image."
+
+    # Only reject if content_type is explicitly set AND clearly not an image
+    if content_type and not content_type.startswith("image/"):
+        return False, "Unsupported file type", "Please upload a valid image file."
 
     width, height = image.size
     if width < MIN_WIDTH or height < MIN_HEIGHT:
@@ -79,7 +74,7 @@ async def predict(file: UploadFile = File(...)):
     try:
         image_bytes = await file.read()
 
-        # Step 1: basic file validation
+        # Step 1: validate
         is_valid, error_title, error_message = validate_uploaded_image(
             image_bytes=image_bytes,
             content_type=file.content_type,
@@ -91,12 +86,15 @@ async def predict(file: UploadFile = File(...)):
                 "status": "invalid",
                 "error": error_title,
                 "message": error_message,
+                "confidence": 0.0,
+                "raw_scores": {"benign": 0.0, "invalid": 0.0, "malignant": 0.0},
+                "note": "For educational and research purposes only. Not a medical diagnosis.",
             }
 
         # Step 2: preprocess
         processed_image = prepare_image(image_bytes)
 
-        # Step 3: predict 3-class probabilities
+        # Step 3: predict
         predictions = model.predict(processed_image, verbose=0)[0]
 
         benign_score = float(predictions[BENIGN_INDEX])
@@ -109,7 +107,7 @@ async def predict(file: UploadFile = File(...)):
             "malignant": round(malignant_score, 4),
         }
 
-        # Step 4: reject as invalid only if the invalid score is strongly high
+        # Step 4: reject if model says invalid
         if invalid_score >= INVALID_THRESHOLD:
             return {
                 "success": False,
@@ -122,7 +120,7 @@ async def predict(file: UploadFile = File(...)):
                 "note": "For educational and research purposes only. Not a medical diagnosis.",
             }
 
-        # Step 5: otherwise decide only between benign and malignant
+        # Step 5: decide benign vs malignant
         if benign_score >= malignant_score:
             predicted_label = "benign"
             confidence = benign_score
@@ -130,7 +128,7 @@ async def predict(file: UploadFile = File(...)):
             predicted_label = "malignant"
             confidence = malignant_score
 
-        # Step 6: uncertainty handling for benign/malignant
+        # Step 6: uncertain
         if confidence < CONFIDENCE_THRESHOLD:
             return {
                 "success": False,
@@ -143,7 +141,7 @@ async def predict(file: UploadFile = File(...)):
                 "note": "For educational and research purposes only. Not a medical diagnosis.",
             }
 
-        # Step 7: confident benign/malignant result
+        # Step 7: confident result
         return {
             "success": True,
             "status": "ok",
